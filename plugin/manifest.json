@@ -1,0 +1,27 @@
+{
+  "id": "metrofuse.soundcloud",
+  "name": "SoundCloud",
+  "version": "1.0.0",
+  "author": "MetroFuse",
+  "api": "1.2.0",
+  "runtime": "javascript",
+  "platforms": [
+    "desktop",
+    "android"
+  ],
+  "script": "index.js",
+  "capabilities": [
+    "audio",
+    "search",
+    "catalog",
+    "home",
+    "library",
+    "login",
+    "settings"
+  ],
+  "description": "SoundCloud web catalog, Home, account library and audio from its original transcodings.",
+  "home": {"title": "SoundCloud"},
+  "settings": [
+    {"key":"quality","title":"SoundCloud audio quality","type":"ENUM","default":"AAC_160","options":["AAC_160","AAC_96","MP3_128"]}
+  ]
+}
