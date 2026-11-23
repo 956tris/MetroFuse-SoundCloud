@@ -2,9 +2,9 @@
 
 SoundCloud for **MetroFuse 10.0.0 Stable** on Android and desktop, targeting Plugin API 1.2.0. Download the MFP from [GitHub Releases](https://github.com/956tris/MetroFuse-SoundCloud/releases/latest) and import it in the MetroFuse Plugins screen.
 
-**Account and recommendations.** Open the plugin's sign-in prompt and enter a SoundCloud OAuth token or a cookie containing `oauth_token`. The plugin verifies the token with SoundCloud before MetroFuse saves it in its credential store. Signed-in Home includes recommendations, stream, likes, and recent plays where SoundCloud exposes them.
+**Account and recommendations.** Open the SoundCloud account screen in MetroFuse and sign in through the built-in WebView. The plugin verifies the captured session before MetroFuse saves it in its credential store. Signed-in Home includes recommendations, stream, likes, and recent plays where SoundCloud exposes them.
 
-**Playback.** Public tracks can play without signing in. The plugin discovers SoundCloud's web client ID, resolves native API v2 transcodings, and sends the chosen HLS or progressive stream to MetroFuse.
+**Playback.** Public tracks with a compatible stream can play without signing in. The plugin discovers SoundCloud's web client ID and resolves HLS or progressive streams through API v2. SoundCloud tracks that only offer protected stream formats require playback in a client that supports those formats.
 
 ## Build
 

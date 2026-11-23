@@ -1,6 +1,6 @@
 /* Based on the original MetroFuse SoundCloud providers at 5ba186773. GPL-3.0. */
 import {
-  array, asArray, bounded, cleanIsrc, expectation, failure, httpsHost, json, matches, numericId,
+  array, asArray, bounded, cleanIsrc, expectation, failure, httpsHost, HttpError, matches, numericId,
   putBounded, query, requestFailure, shelf, soft, text, uniq, unowned,
 } from './provider.js';
 
@@ -16,8 +16,9 @@ const unwrap = value => value?.track ?? value?.playlist ?? value?.system_playlis
   (value?.kind || value?.title || value?.id ? value : value?.user ?? value);
 
 function authToken(value) {
-  const input = text(value);
+  let input = text(value);
   if (!input || input.length > 16384) return '';
+  try { input = decodeURIComponent(input); } catch {}
   const raw = input.replace(/^(?:OAuth|Bearer)\s+/i, '');
   return /^[A-Za-z0-9._~+/-]{16,}={0,2}$/.test(raw) ? raw :
     input.match(/(?:soundcloud[_-]?)?(?:oauth|access)[_-]?token["'\s:=]+["']?([A-Za-z0-9._~+/-]{16,}={0,2})/i)?.[1] ?? '';
@@ -99,7 +100,8 @@ function clientInfo(source) {
 }
 
 function codecFor(mime) {
-  if (/mpeg|mp3/.test(mime)) return 'mp3';
+  if (/mpegurl/.test(mime)) return '';
+  if (/audio\/(?:mpeg|mp3)\b/.test(mime)) return 'mp3';
   if (/aac|mp4/.test(mime)) return 'aac';
   if (/opus/.test(mime)) return 'opus';
   return '';
@@ -113,18 +115,25 @@ function transcodings(track, quality, settings) {
     const mime = text(item.format?.mime_type).toLowerCase();
     const codec = codecFor(mime);
     const protocol = text(item.format?.protocol).toLowerCase();
-    if (!['progressive','hls'].includes(protocol) || !codec || !apiHosts.includes(httpsHost(item.url)) ||
+    const adaptive = protocol === 'hls' && /mpegurl/.test(mime);
+    if (!['progressive','hls'].includes(protocol) || (!codec && !adaptive) || !apiHosts.includes(httpsHost(item.url)) ||
         item.snipped === true || /(?:preview|snipped)/i.test(item.preset ?? '') || /\/(?:preview|snipped)(?:\/|$)/i.test(item.url)) return null;
-    const preset = text(item.preset).match(/(?:aac|mp3|opus)[_-]?(\d{2,3})(?:\b|_)/i)?.[1];
+    const preset = text(item.preset).match(/(?:aac|mp3|opus)[_-]?(\d{2,3})k?(?:\b|_)/i)?.[1];
     let bitrate = Number(item.bitrate ?? item.bit_rate ?? item.format?.bitrate ?? (preset ? Number(preset) * 1000 : 0)) || 0;
     if (bitrate > 0 && bitrate < 1000) bitrate *= 1000;
     if (!bitrate && codec === 'mp3') bitrate = 128000;
+    const maximum = Number(quality?.maxBitrate) || 0;
+    if (maximum > 0 && (bitrate > maximum || !bitrate)) return null;
     const rate = Number(item.sample_rate ?? item.sampleRate ?? item.format?.sample_rate) || 44100;
     const hls = protocol === 'hls';
     const score = (codec === requested.codec ? 200 : 0) + (bitrate === requested.bitrate ? 400 : 0) +
       (hls === (requested.codec === 'aac') ? 40 : 0) + bitrate / 1000;
     return {url: item.url, mime, codec, bitrate, rate, hls, score};
   }).filter(Boolean).sort((a,b) => b.score - a.score);
+}
+
+function offersProtectedAudio(track) {
+  return array(track?.media?.transcodings).some(item => /(?:encrypted|drm)/i.test(item.format?.protocol ?? ''));
 }
 
 export class SoundCloud {
@@ -169,12 +178,26 @@ export class SoundCloud {
     const endpoint = query(url, {...params, client_id: client.clientId, app_version: client.appVersion,
       app_locale: 'en', oauth_token: null, access_token: null});
     try {
-      return await json(this.host, endpoint, {headers: {...header, ...(token ? {Authorization: 'OAuth ' + token} : {})}});
+      return await this.readApi(endpoint, client, {...header, ...(token ? {Authorization: 'OAuth ' + token} : {})});
     } catch (error) {
       if (!retry || token || ![401,403].includes(error.status)) throw error;
       if (this.client === client) this.client = null;
       return this.request(path, params, null, false);
     }
+  }
+
+  async readApi(url, client, headers) {
+    for (let hop = 0; hop < 4; hop++) {
+      const response = await this.host.http({url, headers, timeoutMs: 8000, maxBytes: 2 * 1024 * 1024});
+      if (response.status >= 200 && response.status < 300) return response.body ? JSON.parse(response.body) : {};
+      if (![301,302,303,307,308].includes(response.status)) throw new HttpError(response.status);
+      const location = Object.entries(response.headers ?? {}).find(([key]) => key.toLowerCase() === 'location')?.[1];
+      const next = text(location).startsWith('/') && !text(location).startsWith('//') ?
+        'https://' + httpsHost(url) + location : text(location);
+      if (!apiHosts.includes(httpsHost(next))) throw new HttpError(response.status);
+      url = query(next, {client_id: client.clientId, app_version: client.appVersion, oauth_token: null, access_token: null});
+    }
+    throw new HttpError(508);
   }
 
   async login(auth) {
@@ -376,24 +399,45 @@ export class SoundCloud {
     } catch (error) { return requestFailure(error, 'SoundCloud'); }
     if (!candidates.some(convertTrack)) return failure('NO_MATCH', 'No matching SoundCloud track');
     const quality = request.configuration?.quality ?? await this.host.settings.get('quality');
-    let lastError;
+    let lastError, protectedAudio = false;
     for (let candidate of candidates) {
       if (!convertTrack(candidate) || !playable(candidate)) continue;
       try {
         if (!array(candidate.media?.transcodings).length) candidate = await this.request('/tracks/' + scId(candidate));
         if (!playable(candidate)) continue;
-        for (const stream of transcodings(candidate, request.quality, quality).slice(0, 4)) {
-          try {
-            const result = await this.request(stream.url, {track_authorization: candidate.track_authorization});
-            if (!playableHost(result.url)) continue;
-            return {stream: {transport: stream.hls ? 'HLS' : 'RANGE_HTTP', locator: result.url,
-              mimeType: stream.hls ? 'application/vnd.apple.mpegurl' : stream.mime, codec: stream.codec,
-              ...(stream.bitrate ? {bitrate: stream.bitrate} : {}), sampleRate: stream.rate,
-              expiresAtMillis: Date.now() + 5 * 60 * 1000, headers: performanceHeaders}};
-          } catch (error) { lastError = error; }
+        const cached = this.songs.get(scId(candidate)) === candidate;
+        let attempted = await this.resolveTranscodings(candidate, request.quality, quality);
+        if (!attempted.stream && cached && (attempted.protectedAudio || [401,403,404].includes(attempted.error?.status))) {
+          candidate = await this.request('/tracks/' + scId(candidate));
+          if (!playable(candidate)) continue;
+          this.track(candidate);
+          attempted = await this.resolveTranscodings(candidate, request.quality, quality);
         }
+        if (attempted.stream) return {stream: attempted.stream};
+        protectedAudio ||= attempted.protectedAudio;
+        lastError = attempted.error ?? lastError;
       } catch (error) { lastError = error; }
     }
+    if (!lastError && protectedAudio) return failure('UNSUPPORTED', 'SoundCloud only provides protected streams for this track');
     return lastError ? requestFailure(lastError, 'SoundCloud') : failure('NO_STREAM', 'No full SoundCloud stream is available');
+  }
+
+  async resolveTranscodings(track, quality, preferred) {
+    const candidates = transcodings(track, quality, preferred).slice(0, 4);
+    let error;
+    for (const candidate of candidates) {
+      try {
+        const result = await this.request(candidate.url, {track_authorization: track.track_authorization});
+        if (!playableHost(result.url)) continue;
+        const duration = Math.floor((Number(track.full_duration ?? track.duration) || 0) / 1000);
+        return {stream: {transport: candidate.hls ? 'HLS' : 'DIRECT', locator: result.url,
+          mimeType: candidate.hls ? 'application/vnd.apple.mpegurl' : candidate.mime,
+          ...(candidate.codec ? {codec: candidate.codec} : {}),
+          ...(candidate.bitrate ? {bitrate: candidate.bitrate} : {}), sampleRate: candidate.rate,
+          ...(duration > 0 ? {durationSeconds: duration} : {}),
+          expiresAtMillis: Date.now() + 5 * 60 * 1000, headers: performanceHeaders}};
+      } catch (failure) { error = failure; }
+    }
+    return {error, protectedAudio: !candidates.length && offersProtectedAudio(track)};
   }
 }

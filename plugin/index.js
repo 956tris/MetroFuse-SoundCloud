@@ -1,5 +1,20 @@
 import {SoundCloud} from './soundcloud.js';
 
+const browser = {
+  url: 'https://soundcloud.com/signin',
+  cookieUrl: 'https://soundcloud.com/',
+  cookieField: 'token',
+  requiredCookies: ['oauth_token', 'oauth-token', 'soundcloud_oauth_token', 'access_token'],
+  allowedHosts: ['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'secure.soundcloud.com',
+    'accounts.google.com', 'appleid.apple.com', 'www.facebook.com', 'm.facebook.com'],
+};
+const labels = {
+  title: 'Sign in to SoundCloud',
+  hint: 'Sign in to SoundCloud to load your personal Home feed and library.',
+  error: 'SoundCloud could not verify this session. Finish signing in or try again.',
+  retry: 'Retry', cancel: 'Cancel', login: 'Sign in', logout: 'Sign out',
+};
+
 let provider;
 definePlugin({
   setup(host) {
@@ -7,8 +22,10 @@ definePlugin({
     host.login({
       request: async () => ({
         fields: [{id: 'token', label: 'SoundCloud OAuth token', secret: true}],
-        instructions: 'Enter your SoundCloud OAuth token or a cookie containing oauth_token.',
+        instructions: labels.hint,
       }),
+      web: async () => browser,
+      ui: async () => ({request: browser, labels}),
       login: credentials => provider.login(credentials),
       logout: () => provider.logout(),
     });

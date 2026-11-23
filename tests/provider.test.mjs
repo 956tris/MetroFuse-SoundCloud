@@ -12,7 +12,7 @@ const scTrack = {id: 25, kind: 'track', title: 'One', user: {id: 5, username: 'A
   permalink_url: 'https://soundcloud.com/artist/one', track_authorization: 'playback-proof',
   media: {transcodings: [
     {url: 'https://api-v2.soundcloud.com/media/mp3', preset: 'mp3_128', format: {mime_type: 'audio/mpeg', protocol: 'progressive'}},
-    {url: 'https://api-v2.soundcloud.com/media/aac', preset: 'aac_160', format: {mime_type: 'audio/aac', protocol: 'hls'}},
+    {url: 'https://api-v2.soundcloud.com/media/aac', preset: 'aac_160k', format: {mime_type: 'audio/aac', protocol: 'hls'}},
     {url: 'https://unrelated.example/media', preset: 'aac_160', format: {mime_type: 'audio/aac', protocol: 'hls'}},
   ]},
 };
@@ -36,6 +36,11 @@ test('each API 1.2.0 entry point registers audio, catalog, search, Home and secr
     let login;
     spec.setup({...mock(() => result({})), login: callbacks => { login = callbacks; }});
     assert.equal((await login.request()).fields[0].secret, true);
+    const browser = await login.web();
+    assert.equal(browser.cookieField, (await login.request()).fields[0].id);
+    assert.ok(browser.requiredCookies.includes('oauth_token'));
+    assert.ok(browser.allowedHosts.includes(new URL(browser.url).hostname));
+    assert.deepEqual((await login.ui()).request, browser);
     assert.equal(typeof spec.catalog[manifest.id + '.catalog'].library, 'function');
     assert.equal(typeof spec.search[manifest.id + '.search'], 'function');
     assert.equal(typeof spec.home, 'function');
@@ -120,4 +125,58 @@ test('SoundCloud reloads a cached playlist summary and resolves its ID-only entr
   const playlist = (await provider.search({query: 'Playlist'})).playlists[0];
   const detail = await provider.collectionDetail(playlist.id, 'playlist');
   assert.deepEqual(detail.tracks.map(value => value.title), ['One', 'Two', 'One']);
+});
+
+test('SoundCloud previews stay out of anonymous playback and the bitrate cap selects AAC 96k', async () => {
+  const low = {url: 'https://api-v2.soundcloud.com/media/low', preset: 'aac_96k',
+    format: {mime_type: 'audio/mp4; codecs="mp4a.40.2"', protocol: 'hls'}};
+  const provider = new SoundCloud(mock((url, request) => {
+    assert.equal(request.headers.Authorization, undefined);
+    if (url.pathname === '/tracks/25') return result({...scTrack, media: {transcodings: [
+      {...low, url: 'https://api-v2.soundcloud.com/media/preview', snipped: true},
+      scTrack.media.transcodings[1], low,
+    ]}});
+    assert.equal(url.pathname, '/media/low');
+    return result({url: 'https://audio.sndcdn.com/fixture.m3u8'});
+  }, {quality: 'AAC_160'}));
+  const audio = await provider.audio({identity: {canonicalId: 'soundcloud:track:25'}, quality: {maxBitrate: 128000}});
+  assert.equal(audio.stream.bitrate, 96000);
+  assert.equal(audio.stream.durationSeconds, 180);
+});
+
+test('SoundCloud follows a public permalink redirect and returns a direct stream without account headers', async () => {
+  const provider = new SoundCloud(mock((url, request) => {
+    assert.equal(request.headers.Authorization, undefined);
+    const path = url.pathname;
+    if (path === '/resolve') return {status: 302, headers: {Location: 'https://api.soundcloud.com/tracks/25'}, body: ''};
+    if (path === '/tracks/25') return result({...scTrack, media: {transcodings: [scTrack.media.transcodings[0]]}});
+    assert.equal(path, '/media/mp3');
+    return result({url: 'https://audio.sndcdn.com/fixture.mp3'});
+  }));
+  const audio = await provider.audio({identity: {canonicalId: 'https://soundcloud.com/artist/one'}});
+  assert.equal(audio.stream.transport, 'DIRECT');
+  assert.equal(audio.stream.codec, 'mp3');
+});
+
+test('SoundCloud reports when every transcoding is a protected format', async () => {
+  const provider = new SoundCloud(mock(url => {
+    assert.equal(url.pathname, '/tracks/25');
+    return result({...scTrack, media: {transcodings: [{...scTrack.media.transcodings[1],
+      format: {protocol: 'cbc-encrypted-hls', mime_type: 'audio/mp4'}}]}});
+  }));
+  const audio = await provider.audio({identity: {canonicalId: 'soundcloud:track:25'}});
+  assert.equal(audio.error.code, 'UNSUPPORTED');
+});
+
+test('SoundCloud refreshes a stale playback authorization from its cached search result', async () => {
+  const provider = new SoundCloud(mock(url => {
+    if (url.pathname === '/search/tracks') return result({collection: [scTrack]});
+    if (url.pathname.startsWith('/search/')) return result({collection: []});
+    if (url.pathname === '/tracks/25') return result({...scTrack, track_authorization: 'fresh-playback-proof'});
+    return url.searchParams.get('track_authorization') === 'fresh-playback-proof' ?
+      result({url: 'https://audio.sndcdn.com/fixture.m3u8'}) : result({}, 403);
+  }));
+  const track = (await provider.search({query: 'One'})).tracks[0];
+  const audio = await provider.audio({identity: {canonicalId: track.id}});
+  assert.equal(audio.stream.transport, 'HLS');
 });
