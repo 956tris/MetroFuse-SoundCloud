@@ -2,10 +2,10 @@ import {SoundCloud} from './soundcloud.js';
 
 const browser = {
   url: 'https://soundcloud.com/signin',
-  cookieUrl: 'https://soundcloud.com/',
+  cookieUrl: 'https://soundcloud.com/signin/callback',
   cookieField: 'token',
   requiredCookies: ['oauth_token', 'oauth-token', 'soundcloud_oauth_token', 'access_token'],
-  allowedHosts: ['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'secure.soundcloud.com',
+  allowedHosts: ['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'secure.soundcloud.com', 'api-auth.soundcloud.com',
     'accounts.google.com', 'appleid.apple.com', 'www.facebook.com', 'm.facebook.com'],
 };
 const labels = {

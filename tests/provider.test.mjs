@@ -39,6 +39,7 @@ test('each API 1.2.0 entry point registers audio, catalog, search, Home and secr
     const browser = await login.web();
     assert.equal(browser.cookieField, (await login.request()).fields[0].id);
     assert.ok(browser.requiredCookies.includes('oauth_token'));
+    assert.equal(browser.cookieUrl, 'https://soundcloud.com/signin/callback');
     assert.ok(browser.allowedHosts.includes(new URL(browser.url).hostname));
     assert.deepEqual((await login.ui()).request, browser);
     assert.equal(typeof spec.catalog[manifest.id + '.catalog'].library, 'function');
@@ -179,4 +180,26 @@ test('SoundCloud refreshes a stale playback authorization from its cached search
   const track = (await provider.search({query: 'One'})).tracks[0];
   const audio = await provider.audio({identity: {canonicalId: track.id}});
   assert.equal(audio.stream.transport, 'HLS');
+});
+
+test('SoundCloud accepts a WebView cookie value and retries public audio after the account expires', async () => {
+  const requests = [];
+  const provider = new SoundCloud(mock((url, request) => {
+    const authorization = request.headers.Authorization;
+    requests.push([url.pathname, Boolean(authorization)]);
+    if (url.pathname === '/me') {
+      assert.equal(authorization, 'OAuth ' + webToken);
+      return result({id: 11, username: 'Account'});
+    }
+    if (authorization) return result({}, 401);
+    if (url.pathname === '/tracks/25') return result(scTrack);
+    return result({url: 'https://audio.sndcdn.com/fixture.m3u8'});
+  }));
+  const header = 'tracking=ignored; oauth_token=OAuth%20' + webToken + '; consent=on';
+  assert.equal((await provider.login({values: {token: header}})).loggedIn, true);
+  const audio = await provider.audio({identity: {canonicalId: 'soundcloud:track:25'}});
+  assert.equal(audio.stream.attributes.resolvedMediaId, 'soundcloud:track:25');
+  assert.deepEqual(requests, [
+    ['/me', true], ['/tracks/25', true], ['/tracks/25', false], ['/media/aac', true], ['/media/aac', false],
+  ]);
 });

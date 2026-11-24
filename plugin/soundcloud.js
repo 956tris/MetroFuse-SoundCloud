@@ -16,12 +16,21 @@ const unwrap = value => value?.track ?? value?.playlist ?? value?.system_playlis
   (value?.kind || value?.title || value?.id ? value : value?.user ?? value);
 
 function authToken(value) {
-  let input = text(value);
+  const input = text(value);
   if (!input || input.length > 16384) return '';
-  try { input = decodeURIComponent(input); } catch {}
-  const raw = input.replace(/^(?:OAuth|Bearer)\s+/i, '');
-  return /^[A-Za-z0-9._~+/-]{16,}={0,2}$/.test(raw) ? raw :
-    input.match(/(?:soundcloud[_-]?)?(?:oauth|access)[_-]?token["'\s:=]+["']?([A-Za-z0-9._~+/-]{16,}={0,2})/i)?.[1] ?? '';
+  const names = ['oauth_token', 'oauth-token', 'soundcloud_oauth_token', 'access_token'];
+  const cookies = new Map();
+  for (const part of input.split(';')) {
+    const split = part.indexOf('=');
+    if (split > 0) cookies.set(part.slice(0, split).trim(), part.slice(split + 1).trim());
+  }
+  for (let candidate of [...names.map(name => cookies.get(name)), input]) {
+    if (!candidate) continue;
+    try { candidate = decodeURIComponent(candidate); } catch {}
+    candidate = candidate.replace(/^["']|["']$/g, '').replace(/^(?:OAuth|Bearer)\s+/i, '');
+    if (/^[A-Za-z0-9._~+/-]{16,}={0,2}$/.test(candidate)) return candidate;
+  }
+  return '';
 }
 
 function scId(value) {
@@ -183,6 +192,15 @@ export class SoundCloud {
       if (!retry || token || ![401,403].includes(error.status)) throw error;
       if (this.client === client) this.client = null;
       return this.request(path, params, null, false);
+    }
+  }
+
+  async playbackRequest(path, params) {
+    try {
+      return await this.request(path, params);
+    } catch (error) {
+      if (!this.account || ![401,403].includes(error.status)) throw error;
+      return this.request(path, params, null);
     }
   }
 
@@ -384,15 +402,15 @@ export class SoundCloud {
     let candidates;
     try {
       if (explicit) {
-        candidates = [permalink(explicit) ? await this.request('/resolve', {url: explicit}) :
-          this.songs.get(explicit) ?? await this.request('/tracks/' + explicit)];
+        candidates = [permalink(explicit) ? await this.playbackRequest('/resolve', {url: explicit}) :
+          this.songs.get(explicit) ?? await this.playbackRequest('/tracks/' + explicit)];
       } else {
         const expected = await expectation(this.host, request);
         const found = [];
-        if (expected.isrc) found.push(...asArray(await this.request('/search/tracks', {q: expected.isrc, limit: 20}))
+        if (expected.isrc) found.push(...asArray(await this.playbackRequest('/search/tracks', {q: expected.isrc, limit: 20}))
           .filter(value => convertTrack(value)?.extras.isrc === expected.isrc));
         if (!matches(expected, found, convertTrack).length && expected.title && expected.artist) {
-          found.push(...asArray(await this.request('/search/tracks', {q: expected.title + ' ' + expected.artist, limit: 20})));
+          found.push(...asArray(await this.playbackRequest('/search/tracks', {q: expected.title + ' ' + expected.artist, limit: 20})));
         }
         candidates = uniq(matches(expected, found, convertTrack), scId).slice(0, 2);
       }
@@ -403,12 +421,12 @@ export class SoundCloud {
     for (let candidate of candidates) {
       if (!convertTrack(candidate) || !playable(candidate)) continue;
       try {
-        if (!array(candidate.media?.transcodings).length) candidate = await this.request('/tracks/' + scId(candidate));
+        if (!array(candidate.media?.transcodings).length) candidate = await this.playbackRequest('/tracks/' + scId(candidate));
         if (!playable(candidate)) continue;
         const cached = this.songs.get(scId(candidate)) === candidate;
         let attempted = await this.resolveTranscodings(candidate, request.quality, quality);
         if (!attempted.stream && cached && (attempted.protectedAudio || [401,403,404].includes(attempted.error?.status))) {
-          candidate = await this.request('/tracks/' + scId(candidate));
+          candidate = await this.playbackRequest('/tracks/' + scId(candidate));
           if (!playable(candidate)) continue;
           this.track(candidate);
           attempted = await this.resolveTranscodings(candidate, request.quality, quality);
@@ -427,7 +445,7 @@ export class SoundCloud {
     let error;
     for (const candidate of candidates) {
       try {
-        const result = await this.request(candidate.url, {track_authorization: track.track_authorization});
+        const result = await this.playbackRequest(candidate.url, {track_authorization: track.track_authorization});
         if (!playableHost(result.url)) continue;
         const duration = Math.floor((Number(track.full_duration ?? track.duration) || 0) / 1000);
         return {stream: {transport: candidate.hls ? 'HLS' : 'DIRECT', locator: result.url,
@@ -435,6 +453,7 @@ export class SoundCloud {
           ...(candidate.codec ? {codec: candidate.codec} : {}),
           ...(candidate.bitrate ? {bitrate: candidate.bitrate} : {}), sampleRate: candidate.rate,
           ...(duration > 0 ? {durationSeconds: duration} : {}),
+          attributes: {resolvedMediaId: 'soundcloud:track:' + scId(track)},
           expiresAtMillis: Date.now() + 5 * 60 * 1000, headers: performanceHeaders}};
       } catch (failure) { error = failure; }
     }
