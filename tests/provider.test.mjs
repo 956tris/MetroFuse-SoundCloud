@@ -17,6 +17,35 @@ const scTrack = {id: 25, kind: 'track', title: 'One', user: {id: 5, username: 'A
   ]},
 };
 
+test('SoundCloud returns a media redirect without sending account headers to the CDN', async () => {
+  const locator = 'https://audio.sndcdn.com/playback.m3u8';
+  const provider = new SoundCloud(mock((url, request) => {
+    assert.equal(url.hostname, 'api-v2.soundcloud.com');
+    assert.equal(request.headers.Authorization, 'OAuth ' + webToken);
+    if (url.pathname === '/me') return result({id: 5, username: 'Artist'});
+    if (url.pathname === '/tracks/25') return result(scTrack);
+    assert.equal(url.pathname, '/media/aac');
+    return {status: 302, headers: {Location: locator}, body: ''};
+  }));
+  assert.equal((await provider.login({values: {token: webToken}})).loggedIn, true);
+  const {stream} = await provider.audio({identity: {canonicalId: 'soundcloud:track:25'}});
+  assert.equal(stream.locator, locator);
+  assert.equal(stream.transport, 'HLS');
+  assert.equal(stream.headers.Authorization, undefined);
+});
+
+test('SoundCloud verifies a captured session through the account API if the web endpoint fails', async () => {
+  const provider = new SoundCloud(mock((url, request) => {
+    assert.equal(url.pathname, '/me');
+    assert.equal(request.headers.Authorization, 'OAuth ' + webToken);
+    if (url.hostname === 'api-v2.soundcloud.com') return result({}, 404);
+    assert.equal(url.hostname, 'api.soundcloud.com');
+    return result({id: 5, username: 'Artist'});
+  }));
+  assert.deepEqual(await provider.login({values: {token: 'oauth_token=' + webToken}}),
+    {loggedIn: true, accountName: 'Artist'});
+});
+
 function mock(callback, settings = {}, track = null) {
   return {http: request => callback(new URL(request.url), request),
     text: async url => url.endsWith('.js') ? 'client_id:"fixtureclientid0123456789"' :
@@ -39,7 +68,7 @@ test('each API 1.2.0 entry point registers audio, catalog, search, Home and secr
     const browser = await login.web();
     assert.equal(browser.cookieField, (await login.request()).fields[0].id);
     assert.ok(browser.requiredCookies.includes('oauth_token'));
-    assert.equal(browser.cookieUrl, 'https://soundcloud.com/signin/callback');
+    assert.equal(browser.cookieUrl, 'https://soundcloud.com/');
     assert.ok(browser.allowedHosts.includes(new URL(browser.url).hostname));
     assert.deepEqual((await login.ui()).request, browser);
     assert.equal(typeof spec.catalog[manifest.id + '.catalog'].library, 'function');

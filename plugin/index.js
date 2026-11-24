@@ -2,7 +2,7 @@ import {SoundCloud} from './soundcloud.js';
 
 const browser = {
   url: 'https://soundcloud.com/signin',
-  cookieUrl: 'https://soundcloud.com/signin/callback',
+  cookieUrl: 'https://soundcloud.com/',
   cookieField: 'token',
   requiredCookies: ['oauth_token', 'oauth-token', 'soundcloud_oauth_token', 'access_token'],
   allowedHosts: ['soundcloud.com', 'www.soundcloud.com', 'm.soundcloud.com', 'secure.soundcloud.com', 'api-auth.soundcloud.com',

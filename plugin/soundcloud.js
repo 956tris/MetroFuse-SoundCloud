@@ -180,31 +180,31 @@ export class SoundCloud {
     return this.client = {clientId, appVersion, expires: Date.now() + 12 * 60 * 60 * 1000};
   }
 
-  async request(path, params = {}, token = this.account?.token, retry = true) {
+  async request(path, params = {}, token = this.account?.token, retry = true, media = false) {
     const url = path.startsWith('/') ? api + path : path;
     if (!apiHosts.includes(httpsHost(url))) throw Error('Invalid SoundCloud API endpoint');
     const client = await this.webClient();
     const endpoint = query(url, {...params, client_id: client.clientId, app_version: client.appVersion,
       app_locale: 'en', oauth_token: null, access_token: null});
     try {
-      return await this.readApi(endpoint, client, {...header, ...(token ? {Authorization: 'OAuth ' + token} : {})});
+      return await this.readApi(endpoint, client, {...header, ...(token ? {Authorization: 'OAuth ' + token} : {})}, media);
     } catch (error) {
       if (!retry || token || ![401,403].includes(error.status)) throw error;
       if (this.client === client) this.client = null;
-      return this.request(path, params, null, false);
+      return this.request(path, params, null, false, media);
     }
   }
 
-  async playbackRequest(path, params) {
+  async playbackRequest(path, params, media = false) {
     try {
-      return await this.request(path, params);
+      return await this.request(path, params, this.account?.token, true, media);
     } catch (error) {
       if (!this.account || ![401,403].includes(error.status)) throw error;
-      return this.request(path, params, null);
+      return this.request(path, params, null, true, media);
     }
   }
 
-  async readApi(url, client, headers) {
+  async readApi(url, client, headers, media) {
     for (let hop = 0; hop < 4; hop++) {
       const response = await this.host.http({url, headers, timeoutMs: 8000, maxBytes: 2 * 1024 * 1024});
       if (response.status >= 200 && response.status < 300) return response.body ? JSON.parse(response.body) : {};
@@ -212,6 +212,8 @@ export class SoundCloud {
       const location = Object.entries(response.headers ?? {}).find(([key]) => key.toLowerCase() === 'location')?.[1];
       const next = text(location).startsWith('/') && !text(location).startsWith('//') ?
         'https://' + httpsHost(url) + location : text(location);
+      // Return the media location to the player. API credentials stay on API hosts.
+      if (media && playableHost(next)) return {url: next};
       if (!apiHosts.includes(httpsHost(next))) throw new HttpError(response.status);
       url = query(next, {client_id: client.clientId, app_version: client.appVersion, oauth_token: null, access_token: null});
     }
@@ -221,8 +223,10 @@ export class SoundCloud {
   async login(auth) {
     const token = authToken(auth?.values?.token);
     if (!token) return {loggedIn: false};
-    const profile = await soft(() => this.request('/me', {}, token));
-    if (!scId(profile) || !text(profile?.username)) return {loggedIn: false};
+    const identified = profile => scId(profile) && text(profile?.username);
+    let profile = await soft(() => this.request('/me', {}, token));
+    if (!identified(profile)) profile = await soft(() => this.request('https://api.soundcloud.com/me', {}, token));
+    if (!identified(profile)) return {loggedIn: false};
     this.collections.clear();
     this.songs.clear();
     this.account = {token, id: scId(profile), name: text(profile.username)};
@@ -425,7 +429,7 @@ export class SoundCloud {
         if (!playable(candidate)) continue;
         const cached = this.songs.get(scId(candidate)) === candidate;
         let attempted = await this.resolveTranscodings(candidate, request.quality, quality);
-        if (!attempted.stream && cached && (attempted.protectedAudio || [401,403,404].includes(attempted.error?.status))) {
+        if (!attempted.stream && cached) {
           candidate = await this.playbackRequest('/tracks/' + scId(candidate));
           if (!playable(candidate)) continue;
           this.track(candidate);
@@ -445,10 +449,11 @@ export class SoundCloud {
     let error;
     for (const candidate of candidates) {
       try {
-        const result = await this.playbackRequest(candidate.url, {track_authorization: track.track_authorization});
-        if (!playableHost(result.url)) continue;
+        const result = await this.playbackRequest(candidate.url, {track_authorization: track.track_authorization}, true);
+        const locator = [result.url, result.stream_url].find(playableHost);
+        if (!locator) continue;
         const duration = Math.floor((Number(track.full_duration ?? track.duration) || 0) / 1000);
-        return {stream: {transport: candidate.hls ? 'HLS' : 'DIRECT', locator: result.url,
+        return {stream: {transport: candidate.hls ? 'HLS' : 'DIRECT', locator,
           mimeType: candidate.hls ? 'application/vnd.apple.mpegurl' : candidate.mime,
           ...(candidate.codec ? {codec: candidate.codec} : {}),
           ...(candidate.bitrate ? {bitrate: candidate.bitrate} : {}), sampleRate: candidate.rate,
